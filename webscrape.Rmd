@@ -1,0 +1,256 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an example webscrapping in R. Full tutorial here: https://www.business-science.io/code-tools/2019/10/07/rvest-web-scraping.html?utm_source=feedburner&utm_medium=twitter&utm_campaign=Feed%3A+business-science+%28www.business-science.io%29
+
+Here’s the workflow I used to web scrape the Specialized Data and create an application:
+
+Start with URL of Specialized Bicycles
+
+Use rvest and jsonlite to extract product data
+
+Clean up data into “tidy” format using purrr and stringr
+
+Visualize product prices with ggplot2
+
+The website is: 
+
+```{r}
+# Load libraries
+library(robotstxt) # get and check robots.txt files
+library(rvest)     # HTML Hacking & Web Scraping
+library(jsonlite)  # JSON manipulation
+library(tidyverse) # Data Manipulation
+library(xopen)     # Opens URL in Browser
+library(knitr)     # Pretty HTML Tables
+```
+
+```{r}
+get_robotstxt("https://www.specialized.com")
+rbt <- robotstxt("https://www.specialized.com")
+rbt$bots
+rbt$permissions
+
+rbt$crawl_delay
+
+# are we allowed to scrape?
+paths_allowed("https://www.specialized.com/us/en/shop/bikes/c/bikes?q=%3Aprice-desc%3Aarchived%3Afalse&show=All")
+
+url <- "https://www.specialized.com/us/en/shop/bikes/c/bikes?q=%3Aprice-desc%3Aarchived%3Afalse&show=All"
+#read the page
+page <- read_html(url)
+```
+
+```{r}
+page
+```
+
+```{r}
+#using Dev tools in chrome find out the main class of json data. you will need to add the "." before the calss name
+page %>% 
+  rvest::html_nodes(".product-list__item-wrapper")
+```
+
+```{r}
+#extract the attribute within this node that contains json data
+json_data <- page %>% 
+  html_nodes(".product-list__item-wrapper")%>%
+  html_attr("data-product-ic")
+
+json_data
+```
+
+```{r}
+#convert json data to tibble
+json_data %>% 
+  fromJSON() %>%
+  as_tibble()
+```
+
+this gives parsing error.
+
+
+```{r}
+# Make Function to iterate over everything and analyse errors separatly
+from_json_to_tibble <- function(json) {
+    json %>%
+        fromJSON() %>%
+        as_tibble()
+}
+```
+
+```{r}
+json_data[1] %>%
+    from_json_to_tibble()
+```
+
+```{r}
+bike_data_list <- json_data %>%
+    map(safely(from_json_to_tibble)) 
+```
+
+
+```{r}
+bike_data_list[1]
+```
+
+```{r}
+#extract errors
+bike_data_list %>%
+  # Grab just the $error elements
+    map(~ pluck(., "error")) %>%
+    # Convert from list to tibble
+    enframe(name = "row") %>%
+    # Return TRUE if element has error
+    mutate(is_error = map(value, function(x) !is.null(x))) %>%
+    # Unnest nested list
+    unnest(is_error) %>%
+    # Filter where error == TRUE
+    filter(is_error)
+```
+
+```{r}
+json_data[218] %>%
+  str_replace('22.5\\" TT', '22.5 TT') %>%
+    from_json_to_tibble()
+```
+
+```{r}
+json_data[218] %>%
+  str_replace('22.5\\" TT', '22.5 TT') %>%
+  str_replace('\\"BMX / Dirt Jump\\"','BMX / Dirt Jump')%>%
+    from_json_to_tibble()
+```
+
+```{r}
+json_data[[286]]
+```
+
+```{r}
+#both same errors so just add str_replace and re-run
+bikes_data <- json_data %>%
+  str_replace('22.5\\" TT', '22.5 TT') %>%
+  str_replace('\\"BMX / Dirt Jump\\"','BMX / Dirt Jump') %>%
+  map_dfr(from_json_to_tibble)
+```
+
+```{r}
+bikes_data
+```
+
+```{r}
+bikes_data <- janitor::remove_empty(bikes_data)
+```
+
+
+
+```{r}
+bikes_data <- bikes_data %>%
+  mutate_all(funs(replace(., .=='', NA)))
+
+bikes_data <- janitor::remove_empty(bikes_data)
+bikes_data
+```
+
+# rename cols to make them more friendly
+
+```{r}
+table(bikes_data$dimension5)
+```
+
+```{r}
+bikes_data <- bikes_data %>% mutate(dimension6 = fct_recode(dimension6,"S-Works" = "S-Works/S-Works"))
+bikes_data <- bikes_data %>% mutate(dimension8 = fct_recode(dimension8,"Men/Women" = "Men/Men/Women"))
+bikes_data <- bikes_data %>% mutate(dimension2 = fct_recode(dimension2,"Mountain" = "Mountain/Mountain"))
+bikes_data <- bikes_data %>% mutate(dimension3 = fct_recode(dimension3,"Epic EVO" = "Epic EVO/Epic EVO"))
+bikes_data <- bikes_data %>% mutate(dimension5 = fct_recode(dimension5,"Cross Country" = "Cross Country/Cross Country"))
+
+bikes_data <- bikes_data %>% rename("gender" = "dimension8",
+                      "edition" = "dimension6",
+                      "category" = "dimension2",
+                      "bike_or_frameset" = "dimension1",
+                      "product_family" = "dimension3",
+                      "experience" = "dimension5",
+                      "price_usd" = "price") %>%
+  select(-currencyCode,-brand)
+bikes_data
+```
+
+# Now bring in other tech specification per bike by opening up their respective web links
+
+```{r}
+# base_url <- "https://www.specialized.com/us/en/shop/bikes/c/bikes?q=%3Aprice-desc%3Aarchived%3Afalse&show=All"
+# tbl_url <- "https://www.specialized.com/us/en/s-works-stumpjumper-st-27-5/p/157592?color=236250-157592"
+# page <- read_html(tbl_url)
+# 
+# #do it for one:
+# # checking if can get col headers
+# page %>% html_nodes("table") %>% html_nodes(".product__specs-table-entry")  %>% html_nodes(".product__specs-table-key") %>%  html_text() %>%
+#   as.data.frame() %>%
+#   rename("spec" = ".")
+# 
+# # easier way to do it is:
+# spec <- page %>% html_nodes(".product__specs-table-key") %>% html_text() %>% str_replace_all(pattern = "\n","")
+# value <- page %>% html_nodes(".product__specs-table-value") %>% html_text() %>% str_replace_all(pattern = "\n","")
+# 
+# data.frame(bike_name = "my_name",spec, value)%>%
+#   spread(spec,value) %>%
+#   select(sort(names(.)))
+
+# get all tables data in one vector
+#page %>% html_nodes("td") %>% html_text() %>% str_replace_all(pattern = "\n","")
+
+specs <- list()
+s <- html_session(url)
+
+for (i in bikes_data$name) {
+  if(!(i %in% c("Women's Tarmac Disc Expert","Riprock Expert 24","Fatboy 24","Fatboy 20","Riprock Comp 24","Men's Rockhopper Sport"))){
+  print(paste("Getting data for:", i))
+   product_page <- s %>% follow_link(i) %>% read_html()
+   #print(product_page)
+   spec <- product_page %>% html_nodes(".product__specs-table-key") %>% html_text() %>% 
+                                          str_replace_all(pattern = "\n","") %>%
+                                          str_trim() %>%
+                                          str_to_upper()
+   value <- product_page %>% html_nodes(".product__specs-table-value") %>% html_text() %>% str_replace_all(pattern = "\n","") %>%
+                   str_trim()
+ 
+ specs[[i]] <- data.frame(bike_name = i,spec, value)%>%
+              spread(spec,value)%>%
+              select(sort(names(.)))
+  }
+}
+length(specs)
+```
+
+```{r}
+bind_rows(specs)
+head(specs[[1]]) %>% inner_join(bikes_data,by = c("bike_name"="name"))
+specs %>% map(~inner_join(.,bikes_data,by = c("bike_name"="name")))
+
+bike_names <- set_names(bikes_data$name)
+
+bike_names %>% map(~inner_join(bikes_data,specs))
+```
+
+```{r}
+specs[["S-Works Roubaix - Shimano Dura-Ace Di2"]] %>% names
+```
+
+
+```{r}
+specs_data <- data.table::rbindlist(specs, fill = TRUE)
+```
+
+```{r}
+bikes_data <- bikes_data %>% left_join(specs_data,by = c("name" = "bike_name"))
+```
+
+```{r}
+bikes_data
+```
+
+
+
